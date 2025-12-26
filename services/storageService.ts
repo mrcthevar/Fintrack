@@ -58,16 +58,45 @@ export const deleteTransaction = (id: string): Transaction[] => {
 };
 
 // Data Backup Utilities
-export const exportData = () => {
+export const exportData = async (): Promise<void> => {
   const transactions = getTransactions();
   const profile = getUserProfile();
   const data = { transactions, profile };
+  const jsonString = JSON.stringify(data, null, 2);
+  const fileName = `fintrack_backup_${new Date().toISOString().split('T')[0]}.json`;
 
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  try {
+    // Attempt to use the File System Access API (Desktop Chrome/Edge/Opera)
+    // @ts-ignore - window.showSaveFilePicker is not yet in all TS definitions
+    if (typeof window.showSaveFilePicker === 'function') {
+      // @ts-ignore
+      const handle = await window.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{
+          description: 'Fintrack Data',
+          accept: { 'application/json': ['.json'] },
+        }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(jsonString);
+      await writable.close();
+      return;
+    }
+  } catch (err: any) {
+    // If user cancels the save dialog, we stop.
+    if (err.name === 'AbortError') {
+       throw err; 
+    }
+    // For other errors, we fall through to the legacy download method
+    console.warn("File System Access API failed, falling back to download:", err);
+  }
+
+  // Fallback: Standard Download (Mobile / Firefox / Safari)
+  const blob = new Blob([jsonString], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `fintrack_backup_${new Date().toISOString().split('T')[0]}.json`;
+  a.download = fileName;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

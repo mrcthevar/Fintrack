@@ -8,7 +8,7 @@ import SmartAddModal from './components/SmartAddModal.tsx';
 import ProfileModal from './components/ProfileModal.tsx';
 import ToastContainer from './components/Toast.tsx';
 import SettingsView from './components/Settings.tsx';
-import { LayoutDashboard, Receipt, LineChart, Plus, Wallet, Download, Upload, User, Settings } from 'lucide-react';
+import { LayoutDashboard, Receipt, LineChart, Plus, Wallet, Download, Upload, User, Settings, Save } from 'lucide-react';
 
 const App: React.FC = () => {
   const [view, setView] = useState<ViewState>('dashboard');
@@ -58,9 +58,15 @@ const App: React.FC = () => {
       showToast("Profile updated successfully", "success");
   };
 
-  const handleBackup = () => {
-      exportData();
-      showToast("Backup downloaded", "success");
+  const handleBackup = async () => {
+      try {
+        await exportData();
+        showToast("Data saved successfully!", "success");
+      } catch (error: any) {
+        if (error.name !== 'AbortError') {
+            showToast("Failed to save data", "error");
+        }
+      }
   };
 
   const handleRestoreClick = () => {
@@ -80,6 +86,19 @@ const App: React.FC = () => {
           }
       }
       if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Handler for restoring data specifically from the Onboarding Modal
+  const handleModalRestore = (data: { transactions: Transaction[], profile?: UserProfile }) => {
+      setTransactions(data.transactions);
+      if (data.profile) {
+          setUserProfile(data.profile);
+          setIsProfileModalOpen(false);
+          showToast("Welcome back! Data restored successfully.", "success");
+      } else {
+          // If backup has transactions but no profile, keep modal open but let them create a name
+          showToast("Transactions restored. Please create a profile.", "info");
+      }
   };
 
   const handleClearData = () => {
@@ -145,6 +164,11 @@ const App: React.FC = () => {
         </nav>
 
         <div className="p-4 border-t border-gray-50 space-y-2">
+           <button onClick={handleBackup} className="w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 text-gray-500 hover:bg-gray-50 hover:text-indigo-600 group">
+               <Save size={20} className="text-gray-400 group-hover:text-indigo-600"/> 
+               <span className="font-medium">Save Data</span>
+           </button>
+           
            <button onClick={() => setView('settings')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${view === 'settings' ? 'bg-indigo-50 text-indigo-600 font-medium' : 'text-gray-500 hover:bg-gray-50 hover:text-indigo-600'}`}>
                <Settings size={20} /> Settings
            </button>
@@ -159,6 +183,9 @@ const App: React.FC = () => {
             <span className="font-bold">Fintrack</span>
          </div>
          <div className="flex items-center gap-2">
+            <button onClick={handleBackup} className="w-8 h-8 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center">
+               <Save size={18} />
+            </button>
             <button onClick={() => setView('settings')} className="w-8 h-8 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center">
                <Settings size={18} />
             </button>
@@ -232,6 +259,7 @@ const App: React.FC = () => {
          isOpen={isProfileModalOpen}
          onClose={() => setIsProfileModalOpen(false)}
          onSave={handleSaveProfile}
+         onRestoreData={handleModalRestore}
          initialProfile={userProfile}
          isForceOpen={!userProfile}
       />
