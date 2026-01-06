@@ -17,10 +17,16 @@ export const parseBankStatement = async (file: File): Promise<Transaction[]> => 
   try {
     if (file.type === 'application/pdf') {
         return await parsePdf(file);
-    } else if (file.name.match(/\.(xlsx|xls)$/) || file.type.includes('sheet') || file.type.includes('excel')) {
-        return await parseExcel(file);
+    } else if (
+        file.name.match(/\.(xlsx|xls|csv)$/i) || 
+        file.type.includes('sheet') || 
+        file.type.includes('excel') || 
+        file.type.includes('csv') ||
+        file.type === 'text/csv'
+    ) {
+        return await parseSpreadsheet(file);
     } else {
-        throw new Error('Unsupported file format. Please upload PDF or Excel.');
+        throw new Error('Unsupported file format. Please upload PDF, Excel (.xlsx), or CSV.');
     }
   } catch (error) {
     console.error('File Parse Error:', error);
@@ -40,106 +46,195 @@ const parsePdf = async (file: File): Promise<Transaction[]> => {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
-      // item.str is the text content
-      const pageText = textContent.items.map((item: any) => item.str).join(' ');
-      fullText += pageText + '\n';
+      const items: any[] = textContent.items;
+
+      // Sort items by Y (descending) then X (ascending) to reconstruct lines
+      // Note: PDF Y-coordinates usually start from bottom, so higher Y is top of page
+      items.sort((a, b) => {
+          const yDiff = b.transform[5] - a.transform[5];
+          // Use a tolerance of 4 units to group items on the "same line"
+          if (Math.abs(yDiff) > 4) return yDiff; 
+          return a.transform[4] - b.transform[4];
+      });
+
+      let currentY = -99999;
+      let pageLines: string[] = [];
+      let currentLine: string[] = [];
+
+      items.forEach((item) => {
+          // Initialize Y for the first item
+          if (currentY === -99999) currentY = item.transform[5];
+          
+          // Check if this item is on a new line (significant Y difference)
+          if (Math.abs(item.transform[5] - currentY) > 4) {
+              // Push the completed line
+              if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
+              
+              // Start new line
+              currentLine = [];
+              currentY = item.transform[5];
+          }
+          // Add item text to current line
+          if (item.str.trim()) {
+              currentLine.push(item.str);
+          }
+      });
+      // Push the last line of the page
+      if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
+
+      fullText += pageLines.join('\n') + '\n';
     }
 
     return extractTransactionsFromText(fullText);
 }
 
-const parseExcel = async (file: File): Promise<Transaction[]> => {
+const parseSpreadsheet = async (file: File): Promise<Transaction[]> => {
     const arrayBuffer = await file.arrayBuffer();
-    const workbook = read(arrayBuffer, { type: 'array' });
+    // xlsx.read handles XLS, XLSX, and CSV automatically
+    const workbook = read(arrayBuffer, { type: 'array', cellDates: true });
     
     // Assume the first sheet contains the data
     const firstSheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[firstSheetName];
 
-    // Convert sheet to array of arrays, forcing dates to be formatted as strings
-    const rows: any[][] = utils.sheet_to_json(worksheet, { header: 1, raw: false, dateNF: 'dd-mm-yyyy' });
+    // Convert sheet to array of arrays
+    // Use raw: false to get formatted strings for numbers (helpful for consistency)
+    // but check if we need dateNF to ensure dates come out in a recognizable text format
+    const rows: any[][] = utils.sheet_to_json(worksheet, { 
+        header: 1, 
+        raw: false, 
+        dateNF: 'yyyy-mm-dd' // Normalize dates to ISO-like to help regex
+    });
 
     // Join all rows into a single text block to reuse the regex extractor
-    const fullText = rows.map(row => row.join(' ')).join('\n');
+    // Filter out empty rows
+    const fullText = rows
+        .filter(row => row.length > 0)
+        .map(row => row.join(' '))
+        .join('\n');
     
     return extractTransactionsFromText(fullText);
 }
 
-// Simple regex-based extraction for demonstration
-// Matches patterns like: "12-05-2024 UPI/12345/Merchant 500.00 Cr"
+// Improved extraction logic with better Regex support
 const extractTransactionsFromText = (text: string): Transaction[] => {
   const transactions: Transaction[] = [];
   const lines = text.split('\n');
   
-  // Basic Regex for Date (DD/MM or DD-MM or DD-MM-YYYY)
-  const dateRegex = /(\d{2}[-/]\d{2}[-/]\d{4}|\d{2}[-/]\d{2})/;
-  // Regex for Amount (looks for numbers with decimals)
-  const amountRegex = /(\d{1,10}\.\d{2})/;
+  // Date Regex: Matches DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, DD MMM YYYY
+  const dateRegex = /\b(\d{1,2}[-/.](?:\d{1,2}|[A-Za-z]{3})[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
+  
+  // Amount Regex: Matches numbers with optional commas and mandatory decimal (1 or 2 places)
+  // We require a decimal to avoid matching IDs, Years, or Check Numbers as amounts
+  // e.g. 1,000.00, 500.5, 500.0
+  const amountRegex = /\b(?:[1-9]\d{0,2}(?:,\d{3})*|0)\.\d{1,2}\b/;
 
   lines.forEach(line => {
-    // Heuristic: A line needs a date and an amount to be a transaction
-    const dateMatch = line.match(dateRegex);
-    const amountMatch = line.match(amountRegex);
+    const cleanLine = line.trim();
+    if (!cleanLine) return;
 
-    if (dateMatch && amountMatch) {
-      const amountStr = amountMatch[0];
-      const amount = parseFloat(amountStr);
-      
-      // Determine Type (Dr/Cr or -/+)
-      let type = TransactionType.EXPENSE;
-      if (line.toLowerCase().includes('cr') || line.toLowerCase().includes('credit') || line.includes('+')) {
-        type = TransactionType.INCOME;
-      }
+    // 1. Find Date first
+    const dateMatch = cleanLine.match(dateRegex);
+    
+    if (dateMatch) {
+        // 2. Remove the date from the line so we don't accidentally match the year as an amount
+        // (e.g. 2024 could look like an amount if we relaxed the regex too much)
+        const lineWithoutDate = cleanLine.replace(dateMatch[0], ' ');
+        
+        // 3. Find Amount in the remaining text
+        const amountMatch = lineWithoutDate.match(amountRegex);
 
-      // Determine Category & Method (Simple Keyword Matching)
-      let category = Category.OTHER;
-      let method = PaymentMethod.ONLINE;
-      const lowerLine = line.toLowerCase();
+        if (amountMatch) {
+            const amountStr = amountMatch[0].replace(/,/g, '');
+            const amount = parseFloat(amountStr);
+            
+            // Determine Type
+            let type = TransactionType.EXPENSE;
+            const lowerLine = cleanLine.toLowerCase();
+            
+            if (lowerLine.includes('cr') || lowerLine.includes('credit') || lowerLine.includes('deposit') || cleanLine.includes('+')) {
+                type = TransactionType.INCOME;
+            }
 
-      if (lowerLine.includes('upi')) method = PaymentMethod.UPI;
-      else if (lowerLine.includes('atm') || lowerLine.includes('cash')) method = PaymentMethod.CASH;
+            // Determine Category & Method
+            let category = Category.OTHER;
+            let method = PaymentMethod.ONLINE;
 
-      if (lowerLine.includes('swiggy') || lowerLine.includes('zomato') || lowerLine.includes('food')) category = Category.FOOD;
-      else if (lowerLine.includes('uber') || lowerLine.includes('ola') || lowerLine.includes('fuel')) category = Category.TRANSPORT;
-      else if (lowerLine.includes('netflix') || lowerLine.includes('prime')) category = Category.ENTERTAINMENT;
-      else if (lowerLine.includes('rent')) category = Category.HOUSING;
-      else if (lowerLine.includes('salary')) {
-          category = Category.SALARY;
-          type = TransactionType.INCOME;
-      }
+            if (lowerLine.includes('upi')) method = PaymentMethod.UPI;
+            else if (lowerLine.includes('atm') || lowerLine.includes('cash') || lowerLine.includes('withdrawal')) method = PaymentMethod.CASH;
 
-      // Clean Description
-      let description = line
-        .replace(dateMatch[0], '')
-        .replace(amountMatch[0], '')
-        .replace(/cr|dr|credit|debit/i, '')
-        .trim();
-      
-      if (description.length > 50) description = description.substring(0, 50) + '...';
-      if (!description) description = "Unknown Transaction";
+            if (lowerLine.includes('swiggy') || lowerLine.includes('zomato') || lowerLine.includes('food') || lowerLine.includes('restaurant')) category = Category.FOOD;
+            else if (lowerLine.includes('uber') || lowerLine.includes('ola') || lowerLine.includes('fuel') || lowerLine.includes('petrol')) category = Category.TRANSPORT;
+            else if (lowerLine.includes('netflix') || lowerLine.includes('prime') || lowerLine.includes('movie')) category = Category.ENTERTAINMENT;
+            else if (lowerLine.includes('rent') || lowerLine.includes('maintenance')) category = Category.HOUSING;
+            else if (lowerLine.includes('jio') || lowerLine.includes('airtel') || lowerLine.includes('bill') || lowerLine.includes('electricity')) category = Category.UTILITIES;
+            else if (lowerLine.includes('salary')) {
+                category = Category.SALARY;
+                type = TransactionType.INCOME;
+            } else if (lowerLine.includes('interest')) {
+                category = Category.INVESTMENT;
+                type = TransactionType.INCOME;
+            }
 
-      // Parse Date
-      let dateObj = new Date();
-      const dateParts = dateMatch[0].split(/[-/]/);
-      if (dateParts.length === 3) {
-          // DD-MM-YYYY
-          dateObj = new Date(`${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`);
-      } else {
-          // DD-MM (Assume current year)
-          dateObj = new Date(`${new Date().getFullYear()}-${dateParts[1]}-${dateParts[0]}`);
-      }
+            // Clean Description: Remove date, amount, and common keywords
+            let description = lineWithoutDate
+                .replace(amountMatch[0], '')
+                .replace(/\b(cr|dr|credit|debit)\b/gi, '')
+                .trim();
+            
+            // Remove leading/trailing non-alphanumeric chars
+            description = description.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+            
+            if (description.length > 50) description = description.substring(0, 50) + '...';
+            if (!description) description = "Transfer/Payment";
 
-      if (!isNaN(amount) && amount > 0) {
-        transactions.push({
-          id: crypto.randomUUID(),
-          date: dateObj.toISOString(),
-          amount,
-          description,
-          type,
-          category,
-          paymentMethod: method
-        });
-      }
+            // Parse Date
+            let dateObj = new Date();
+            try {
+                const dateStr = dateMatch[0];
+                const parts = dateStr.split(/[-/.\s]/);
+                
+                // Handle YYYY-MM-DD
+                if (parts[0].length === 4) {
+                    dateObj = new Date(dateStr);
+                } else if (parts.length >= 2) {
+                    // Handle DD-MM-YYYY or DD MMM YYYY
+                    let day = parseInt(parts[0]);
+                    let month = 0;
+                    let year = new Date().getFullYear();
+
+                    if (isNaN(parseInt(parts[1]))) {
+                        const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+                        const mStr = parts[1].toLowerCase().substring(0, 3);
+                        month = monthNames.indexOf(mStr);
+                    } else {
+                        month = parseInt(parts[1]) - 1;
+                    }
+
+                    if (parts.length === 3) {
+                        const y = parts[2];
+                        year = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
+                    }
+                    
+                    dateObj = new Date(year, month, day);
+                }
+                dateObj.setHours(12);
+            } catch (e) {
+                console.warn("Date parsing failed", e);
+            }
+
+            if (!isNaN(amount) && amount > 0) {
+                transactions.push({
+                id: crypto.randomUUID(),
+                date: dateObj.toISOString(),
+                amount,
+                description,
+                type,
+                category,
+                paymentMethod: method
+                });
+            }
+        }
     }
   });
 

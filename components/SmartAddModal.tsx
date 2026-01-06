@@ -47,26 +47,18 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
       const file = e.target.files?.[0];
       if (!file) return;
 
-      const isPdf = file.type === 'application/pdf';
-      const isExcel = file.name.match(/\.(xlsx|xls)$/) || file.type.includes('excel') || file.type.includes('sheet');
-
-      if (!isPdf && !isExcel) {
-          showToast("Please upload a PDF or Excel file", "error");
-          return;
-      }
-
       setIsProcessing(true);
       try {
           const transactions = await parseBankStatement(file);
           if (transactions.length === 0) {
-              showToast("No valid transactions found in file", "info");
+              showToast("No valid transactions found in file. Ensure file has Date and Amount columns.", "info");
           } else {
               transactions.forEach(t => onAdd(t));
               showToast(`Imported ${transactions.length} transactions!`, "success");
               onClose();
           }
       } catch (error) {
-          showToast("Failed to parse statement", "error");
+          showToast("Failed to parse statement. Please check file format.", "error");
       } finally {
           setIsProcessing(false);
       }
@@ -217,7 +209,7 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
                             <div>
                                 <h3 className="text-gray-900 font-semibold mb-1">Upload Bank Statement</h3>
                                 <p className="text-xs text-gray-500 max-w-xs mx-auto">
-                                    Upload a PDF or Excel file (SBI, HDFC, ICICI, etc.). We'll try to auto-detect transactions.
+                                    Upload a PDF, Excel, or CSV file. (For Google Sheets, download as .csv or .xlsx)
                                 </p>
                             </div>
                             
@@ -225,11 +217,11 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
                                 <div className="w-full py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2">
                                     <Upload size={18} /> Select File
                                 </div>
-                                <input type="file" accept=".pdf, .xlsx, .xls" className="hidden" onChange={handleFileUpload} />
+                                <input type="file" accept=".pdf, .xlsx, .xls, .csv" className="hidden" onChange={handleFileUpload} />
                             </label>
                             
                             <p className="text-[10px] text-gray-400 mt-4">
-                                Supported formats: .pdf, .xlsx, .xls
+                                Supported formats: .pdf, .xlsx, .xls, .csv
                             </p>
                         </>
                     )}
