@@ -5,8 +5,10 @@ import { Transaction, TransactionType, Category, PaymentMethod } from '../types.
 // Handle ESM/CJS interop for pdfjs-dist
 const pdfjsLib = (pdfjsLibModule as any).default || pdfjsLibModule;
 
-if (pdfjsLib.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+// Configure worker using a reliable CDN (CDNJS) to ensure the raw script is loaded correctly
+// avoiding potential issues with ESM wrappers from other providers for the worker file.
+if (pdfjsLib.GlobalWorkerOptions) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
 export const parseBankStatement = async (file: File): Promise<Transaction[]> => {
@@ -26,8 +28,13 @@ export const parseBankStatement = async (file: File): Promise<Transaction[]> => 
     }
   } catch (error: any) {
     console.error('File Parse Error:', error);
+    // Handle PDF password error specifically
     if (error.name === 'PasswordException' || error.message?.includes('password')) {
         throw new Error('Password protected files are not supported. Please remove the password and try again.');
+    }
+    // Handle PDF Worker error
+    if (error.message?.includes('fake worker') || error.message?.includes('WorkerMessageHandler')) {
+        throw new Error('PDF Parser initialization failed. Please refresh and try again.');
     }
     throw new Error(error.message || 'Failed to read file');
   }
