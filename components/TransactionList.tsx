@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { Transaction, TransactionType, PaymentMethod } from '../types';
-import { Trash2, Search, Filter } from 'lucide-react';
+import { Trash2, Search, Filter, Edit2 } from 'lucide-react';
 
 interface TransactionListProps {
   transactions: Transaction[];
   onDelete: (id: string) => void;
+  onEdit: (t: Transaction) => void;
 }
 
-const TransactionList: React.FC<TransactionListProps> = ({ transactions, onDelete }) => {
+const TransactionList: React.FC<TransactionListProps> = ({ transactions, onDelete, onEdit }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'income' | 'expense'>('all');
   const [filterMethod, setFilterMethod] = useState<'all' | PaymentMethod>('all');
@@ -104,7 +105,10 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, onDelet
                   {t.type === TransactionType.INCOME ? '+' : '-'}{formatCurrency(t.amount)}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
-                  <button onClick={() => onDelete(t.id)} className="text-red-400 hover:text-red-600 transition-colors p-2 rounded-full hover:bg-red-50">
+                  <button onClick={() => onEdit(t)} className="text-indigo-400 hover:text-indigo-600 transition-colors p-2 rounded-full hover:bg-indigo-50 mr-1" title="Edit">
+                    <Edit2 size={16} />
+                  </button>
+                  <button onClick={() => onDelete(t.id)} className="text-red-400 hover:text-red-600 transition-colors p-2 rounded-full hover:bg-red-50" title="Delete">
                     <Trash2 size={16} />
                   </button>
                 </td>

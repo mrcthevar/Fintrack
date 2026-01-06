@@ -50,6 +50,13 @@ export const addTransaction = (transaction: Transaction): Transaction[] => {
   return updated;
 };
 
+export const updateTransaction = (transaction: Transaction): Transaction[] => {
+  const current = getTransactions();
+  const updated = current.map(t => t.id === transaction.id ? transaction : t);
+  saveTransactions(updated);
+  return updated;
+};
+
 export const deleteTransaction = (id: string): Transaction[] => {
   const current = getTransactions();
   const updated = current.filter(t => t.id !== id);

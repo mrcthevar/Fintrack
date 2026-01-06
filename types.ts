@@ -13,6 +13,13 @@ export enum Category {
   HEALTH = 'Health',
   SALARY = 'Salary',
   INVESTMENT = 'Investment',
+  EMI = 'EMI',
+  INSURANCE = 'Insurance',
+  CHARGES = 'Bank Charges',
+  TRANSFER = 'Transfer',
+  BILLS = 'Bills',
+  FUEL = 'Fuel',
+  ATM = 'ATM',
   OTHER = 'Other',
 }
 
@@ -20,6 +27,13 @@ export enum PaymentMethod {
   UPI = 'UPI',
   CASH = 'Cash',
   ONLINE = 'Online',
+  CARD = 'Card',
+  ATM = 'ATM',
+  NEFT = 'NEFT',
+  IMPS = 'IMPS',
+  RTGS = 'RTGS',
+  CHEQUE = 'Cheque',
+  OTHER = 'Other',
 }
 
 export interface Transaction {

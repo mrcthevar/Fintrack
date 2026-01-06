@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, IndianRupee, Upload, FileText, Loader2, PenTool, Download } from 'lucide-react';
 import { Transaction, TransactionType, Category, PaymentMethod } from '../types.ts';
 import { parseBankStatement } from '../services/pdfService.ts';
@@ -7,10 +7,12 @@ interface SmartAddModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAdd: (t: Transaction) => void;
+  onUpdate?: (t: Transaction) => void;
+  editingTransaction?: Transaction | null;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, showToast }) => {
+const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, onUpdate, editingTransaction, showToast }) => {
   const [activeTab, setActiveTab] = useState<'manual' | 'file'>('manual');
   
   // Manual Form State
@@ -24,22 +26,55 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
   // File Upload State
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // Effect to handle Edit Mode
+  useEffect(() => {
+    if (isOpen) {
+        if (editingTransaction) {
+            setDescription(editingTransaction.description);
+            setAmount(editingTransaction.amount.toString());
+            setType(editingTransaction.type);
+            setCategory(editingTransaction.category as string);
+            setPaymentMethod(editingTransaction.paymentMethod as PaymentMethod);
+            // Ensure date is YYYY-MM-DD for input type="date"
+            setDate(new Date(editingTransaction.date).toISOString().split('T')[0]);
+            setActiveTab('manual');
+        } else {
+            resetForm();
+        }
+    }
+  }, [isOpen, editingTransaction]);
+
   if (!isOpen) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const newTransaction: Transaction = {
-      id: crypto.randomUUID(),
-      description,
-      amount: parseFloat(amount),
-      type,
-      category,
-      paymentMethod,
-      date: new Date(date).toISOString(),
-    };
-    onAdd(newTransaction);
-    showToast("Transaction added successfully", "success");
-    resetForm();
+    
+    if (editingTransaction && onUpdate) {
+        const updatedTransaction: Transaction = {
+          ...editingTransaction,
+          description,
+          amount: parseFloat(amount),
+          type,
+          category,
+          paymentMethod,
+          date: new Date(date).toISOString(),
+        };
+        onUpdate(updatedTransaction);
+        showToast("Transaction updated successfully", "success");
+    } else {
+        const newTransaction: Transaction = {
+          id: crypto.randomUUID(),
+          description,
+          amount: parseFloat(amount),
+          type,
+          category,
+          paymentMethod,
+          date: new Date(date).toISOString(),
+        };
+        onAdd(newTransaction);
+        showToast("Transaction added successfully", "success");
+        resetForm();
+    }
     onClose();
   };
 
@@ -96,6 +131,7 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
     setCategory(Category.OTHER);
     setPaymentMethod(PaymentMethod.UPI);
     setActiveTab('manual');
+    setDate(new Date().toISOString().split('T')[0]);
   };
 
   return (
@@ -104,27 +140,31 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
         
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b">
-          <h2 className="text-lg font-semibold text-gray-800">Add Transaction</h2>
+          <h2 className="text-lg font-semibold text-gray-800">
+            {editingTransaction ? 'Edit Transaction' : 'Add Transaction'}
+          </h2>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
             <X size={20} />
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex p-2 bg-gray-50 border-b border-gray-100">
-            <button 
-                onClick={() => setActiveTab('manual')}
-                className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all flex items-center justify-center gap-2 ${activeTab === 'manual' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-            >
-               <PenTool size={14} /> Manual
-            </button>
-            <button 
-                onClick={() => setActiveTab('file')}
-                className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all flex items-center justify-center gap-2 ${activeTab === 'file' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-            >
-               <FileText size={14} /> Import Statement
-            </button>
-        </div>
+        {/* Tabs - Only show if not editing */}
+        {!editingTransaction && (
+            <div className="flex p-2 bg-gray-50 border-b border-gray-100">
+                <button 
+                    onClick={() => setActiveTab('manual')}
+                    className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all flex items-center justify-center gap-2 ${activeTab === 'manual' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                   <PenTool size={14} /> Manual
+                </button>
+                <button 
+                    onClick={() => setActiveTab('file')}
+                    className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all flex items-center justify-center gap-2 ${activeTab === 'file' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                   <FileText size={14} /> Import Statement
+                </button>
+            </div>
+        )}
 
         <div className="p-6">
             {activeTab === 'manual' && (
@@ -211,14 +251,14 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
 
                   <button
                     type="submit"
-                    className="w-full py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-colors mt-2"
+                    className="w-full py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-colors mt-2 shadow-lg shadow-indigo-100"
                   >
-                    Save Transaction
+                    {editingTransaction ? 'Update Transaction' : 'Save Transaction'}
                   </button>
                 </form>
             )}
 
-            {activeTab === 'file' && (
+            {activeTab === 'file' && !editingTransaction && (
                 <div className="flex flex-col items-center justify-center py-6 text-center space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
                     {isProcessing ? (
                         <div className="flex flex-col items-center gap-3 text-indigo-600">

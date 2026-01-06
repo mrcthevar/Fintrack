@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ViewState, Transaction, UserProfile, Notification } from './types.ts';
-import { getTransactions, addTransaction as addTxService, deleteTransaction as delTxService, exportData, importData, getUserProfile, saveUserProfile, saveTransactions } from './services/storageService.ts';
+import { getTransactions, addTransaction as addTxService, updateTransaction as updateTxService, deleteTransaction as delTxService, exportData, importData, getUserProfile, saveUserProfile, saveTransactions } from './services/storageService.ts';
 import Dashboard from './components/Dashboard.tsx';
 import TransactionList from './components/TransactionList.tsx';
 import SmartAdvisor from './components/SmartAdvisor.tsx';
@@ -15,6 +15,7 @@ const App: React.FC = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   
@@ -43,6 +44,17 @@ const App: React.FC = () => {
   const handleAddTransaction = (t: Transaction) => {
     const updated = addTxService(t);
     setTransactions(updated);
+  };
+  
+  const handleEditTransaction = (t: Transaction) => {
+    setEditingTransaction(t);
+    setIsAddModalOpen(true);
+  };
+
+  const handleUpdateTransaction = (t: Transaction) => {
+    const updated = updateTxService(t);
+    setTransactions(updated);
+    setEditingTransaction(null);
   };
 
   const handleDeleteTransaction = (id: string) => {
@@ -223,7 +235,10 @@ const App: React.FC = () => {
            
            <div className="flex gap-2">
              <button 
-               onClick={() => setIsAddModalOpen(true)}
+               onClick={() => {
+                   setEditingTransaction(null);
+                   setIsAddModalOpen(true);
+               }}
                className="hidden md:flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 font-medium"
              >
                <Plus size={20} />
@@ -234,7 +249,7 @@ const App: React.FC = () => {
 
         {/* View Switch */}
         {view === 'dashboard' && <Dashboard transactions={transactions} userProfile={userProfile} />}
-        {view === 'transactions' && <TransactionList transactions={transactions} onDelete={handleDeleteTransaction} />}
+        {view === 'transactions' && <TransactionList transactions={transactions} onDelete={handleDeleteTransaction} onEdit={handleEditTransaction} />}
         {view === 'insights' && <SmartAdvisor transactions={transactions} />}
         {view === 'settings' && (
             <SettingsView 
@@ -250,8 +265,13 @@ const App: React.FC = () => {
       {/* Modals */}
       <SmartAddModal 
         isOpen={isAddModalOpen} 
-        onClose={() => setIsAddModalOpen(false)} 
+        onClose={() => {
+            setIsAddModalOpen(false);
+            setTimeout(() => setEditingTransaction(null), 300);
+        }} 
         onAdd={handleAddTransaction}
+        onUpdate={handleUpdateTransaction}
+        editingTransaction={editingTransaction}
         showToast={showToast}
       />
       
