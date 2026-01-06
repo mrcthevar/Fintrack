@@ -123,7 +123,7 @@ const scoreHeaderRow = (row: string[]): number => {
     if (joined.includes('debit') || joined.includes('withdrawal') || joined.includes('dr')) score += 1;
     if (joined.includes('credit') || joined.includes('deposit') || joined.includes('cr')) score += 1;
     if (joined.includes('balance') || joined.includes('bal')) score += 0.5;
-    if (row.includes('amount') || row.includes('amt')) score += 1;
+    if (row.includes('amount') || row.includes('amt') || row.includes('widthdrawal amt.') || row.includes('deposit amt.')) score += 1;
     
     return score;
 };
@@ -132,18 +132,22 @@ const scoreHeaderRow = (row: string[]): number => {
 const extractFromStructuredRows = (rows: any[][], headers: string[]): Transaction[] => {
     const transactions: Transaction[] = [];
     
-    // Helper to find index fuzzy
-    const findIdx = (keywords: string[]) => headers.findIndex(h => keywords.some(k => h.includes(k)));
+    // Helper to find index fuzzy with normalization (removes spaces/dots)
+    // e.g. "Dr / Cr" -> "drcr", "Withdrawal Amt." -> "withdrawalamt"
+    const findIdx = (keywords: string[]) => headers.findIndex(h => {
+        const normalizedHeader = h.replace(/[^a-z0-9]/g, '');
+        return keywords.some(k => normalizedHeader.includes(k.replace(/[^a-z0-9]/g, '')));
+    });
 
     // Detect Column Indices
     const idx = {
-        date: findIdx(['date', 'txn date']),
+        date: findIdx(['date', 'txndate']),
         month: findIdx(['month']),
         // Description
         desc: findIdx(['narration', 'description', 'particulars', 'remarks', 'details']),
         // Amounts
         amt: findIdx(['amount', 'amt']), // Single column amount
-        type: findIdx(['type', 'dr/cr']), // Single column type
+        type: findIdx(['type', 'drcr', 'dr/cr']), // Single column type (Kotak often has 'Dr / Cr')
         debit: findIdx(['withdrawal', 'debit', 'dr']),
         credit: findIdx(['deposit', 'credit', 'cr']),
         // Metadata
@@ -159,7 +163,6 @@ const extractFromStructuredRows = (rows: any[][], headers: string[]): Transactio
                 const monthStr = row[idx.month]?.toString() || '';
                 const dayStr = row[idx.date]?.toString() || '';
                 
-                // Try parsing "Oct'25" or similar
                 const monthMatch = monthStr.match(/([a-zA-Z]{3})['\s-]*(\d{2,4})/);
                 if (monthMatch && dayStr) {
                     const mName = monthMatch[1].toLowerCase();
@@ -183,7 +186,7 @@ const extractFromStructuredRows = (rows: any[][], headers: string[]): Transactio
                                 date: dateObj.toISOString(),
                                 amount,
                                 description: cleanDescription(desc || 'Expense'),
-                                type: TransactionType.EXPENSE, // Default for this format usually
+                                type: TransactionType.EXPENSE, 
                                 category: detectCategory(catRaw || desc || ''),
                                 paymentMethod: detectPaymentMethod(payRaw || desc || '')
                             });
@@ -193,8 +196,7 @@ const extractFromStructuredRows = (rows: any[][], headers: string[]): Transactio
                 return; // processed
             }
 
-            // -- SCENARIO 2: Bank Statement (Withdrawal/Deposit columns) --
-            // Priority: Date must exist
+            // -- SCENARIO 2: Bank Statement --
             if (idx.date === -1) return;
 
             const dateRaw = row[idx.date];
@@ -206,7 +208,7 @@ const extractFromStructuredRows = (rows: any[][], headers: string[]): Transactio
             let amount = 0;
             let type = TransactionType.EXPENSE; // Default
 
-            // Logic 2A: Split Debit/Credit Columns (Common in HDFC, SBI, ICICI)
+            // Logic 2A: Split Debit/Credit Columns (HDFC, SBI, ICICI)
             if (idx.debit !== -1 || idx.credit !== -1) {
                 const debitVal = idx.debit !== -1 ? parseAmount(row[idx.debit]) : 0;
                 const creditVal = idx.credit !== -1 ? parseAmount(row[idx.credit]) : 0;
@@ -219,17 +221,21 @@ const extractFromStructuredRows = (rows: any[][], headers: string[]): Transactio
                     type = TransactionType.INCOME;
                 }
             } 
-            // Logic 2B: Single Amount Column + Type Column
+            // Logic 2B: Single Amount Column + Type Column (Kotak)
             else if (idx.amt !== -1 && idx.type !== -1) {
                 amount = parseAmount(row[idx.amt]);
+                // Check the Type column specifically
                 const typeStr = row[idx.type]?.toString().toLowerCase() || '';
-                if (typeStr.includes('cr') || typeStr.includes('credit')) type = TransactionType.INCOME;
+                if (typeStr.includes('cr')) {
+                    type = TransactionType.INCOME;
+                } else if (typeStr.includes('dr')) {
+                    type = TransactionType.EXPENSE;
+                }
             }
-            // Logic 2C: Single Amount Column (Assume Expense unless negative?)
+            // Logic 2C: Single Amount Column (Assume Expense unless negative/Cr keyword)
             else if (idx.amt !== -1) {
                 const rawAmt = row[idx.amt];
                 amount = parseAmount(rawAmt);
-                // Check if string had negative sign or 'Cr'
                 if (rawAmt && rawAmt.toString().toLowerCase().includes('cr')) type = TransactionType.INCOME;
             }
 
@@ -266,14 +272,14 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
   for (let i = 0; i < Math.min(lines.length, 100); i++) {
       const line = lines[i].toLowerCase();
       // Look for a header signature
-      if (line.includes('date') && (line.includes('balance') || line.includes('withdrawal') || line.includes('deposit') || line.includes('debit'))) {
+      if (line.includes('date') && (line.includes('balance') || line.includes('withdrawal') || line.includes('deposit') || line.includes('debit') || line.includes('description'))) {
           startIndex = i + 1;
           console.log("PDF Table Header detected at line:", i);
           break;
       }
   }
 
-  // Regex to match dates like 29/07/15, 2024-01-01, 01-Jan-2024
+  // Regex to match dates like 29/10/2024, 29/07/15, 01-Jan-2024
   const dateRegex = /\b(\d{1,2}[-/.](?:\d{1,2}|[A-Za-z]{3})[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
   
   // Regex to match currency-like numbers.
@@ -297,11 +303,10 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
     const amounts = [...lineWithoutDate.matchAll(amountRegex)]
         .map(m => ({ val: parseFloat(m[0].replace(/,/g, '')), str: m[0] }));
 
-    // 4. Heuristics to identify the Transaction Amount vs Balance vs Ref No
+    // 4. Heuristics to identify the Transaction Amount vs Balance vs Ref No vs Sl No
     
     const candidates = amounts.filter(a => {
         if (a.val === 0) return false;
-
         // If it's an integer
         if (!a.str.includes('.')) {
             // If it's 4 digits and looks like a recent year, likely garbage
@@ -313,45 +318,73 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
     if (candidates.length === 0) continue;
 
     let amount = 0;
+    let selectedCandidateStr = '';
     
-    // Logic for HDFC / Standard Statement: [Ref, Amount, Balance] OR [Amount, Balance]
+    // Logic:
+    // [SlNo, Ref, Amount, Balance] -> Ref is big integer, SlNo is small integer
     
-    if (candidates.length === 1) {
-        amount = candidates[0].val;
+    // Filter out "Sl No" (small integers at the start)
+    let validCandidates = candidates;
+    
+    // If first candidate is a small integer (<= 1000) and we have other numbers, treat it as Sl No
+    if (validCandidates.length > 1 && !validCandidates[0].str.includes('.') && validCandidates[0].val <= 1000) {
+        validCandidates = validCandidates.slice(1);
+    }
+    
+    if (validCandidates.length === 0) continue;
+
+    // If 1 number -> It's the amount.
+    if (validCandidates.length === 1) {
+        amount = validCandidates[0].val;
+        selectedCandidateStr = validCandidates[0].str;
     } else {
-        // Assume Last number is Balance, usually.
-        // We want the number BEFORE the balance.
-        // UNLESS there is only [Ref, Amount].
+        // We have 2+ numbers.
+        // Usually [Amount, Balance] or [Ref, Amount, Balance]
         
-        // Let's filter out "Ref-like" numbers from the candidates first.
-        // Ref is usually a large Integer appearing FIRST.
-        const nonRefCandidates = candidates.filter((c, idx) => {
-             // If first number is integer > 1000 and there is a subsequent number with decimal, assume first is Ref.
-             if (idx === 0 && !c.str.includes('.') && c.val > 1000 && candidates.length > 1) return false;
+        // Filter out Ref-like (large integers > 1000 that appear first)
+        const nonRefCandidates = validCandidates.filter((c, idx) => {
+             if (idx === 0 && !c.str.includes('.') && c.val > 1000 && validCandidates.length > 1) return false;
              return true;
         });
 
         if (nonRefCandidates.length === 0) {
-            // Fallback
-             amount = candidates[0].val;
-        } else if (nonRefCandidates.length === 1) {
-             amount = nonRefCandidates[0].val;
+             amount = validCandidates[0].val;
+             selectedCandidateStr = validCandidates[0].str;
         } else {
-            // We have 2+ non-ref numbers. (e.g. Withdrawal, Balance).
-            // Usually the Transaction is the First of these.
-            // Balance is the Last.
+            // Usually [Amount, Balance]. Pick first.
             amount = nonRefCandidates[0].val;
+            selectedCandidateStr = nonRefCandidates[0].str;
         }
     }
 
-    // 5. Determine Type
+    // 5. Determine Type (Expense vs Income)
     let type = TransactionType.EXPENSE;
     const lowerLine = cleanLine.toLowerCase();
     
-    if (lowerLine.includes(' cr ') || lowerLine.includes('credit') || lowerLine.includes('deposit') || lowerLine.includes(' dep ')) {
-        type = TransactionType.INCOME;
-    } else if (lowerLine.includes(' dr ') || lowerLine.includes('debit') || lowerLine.includes('withdrawal')) {
-        type = TransactionType.EXPENSE;
+    // PRIORITY: Check for Dr/Cr marker PROXIMITY to the selected amount
+    // Some statements (Kotak) have "Amount DR ... Balance CR". 
+    // We must check if the marker is near OUR amount.
+    if (selectedCandidateStr) {
+        const amtIdx = lowerLine.indexOf(selectedCandidateStr);
+        if (amtIdx !== -1) {
+             // Look at the 10 chars AFTER the amount
+             const suffix = lowerLine.substring(amtIdx + selectedCandidateStr.length, amtIdx + selectedCandidateStr.length + 15);
+             if (suffix.includes('dr')) type = TransactionType.EXPENSE;
+             else if (suffix.includes('cr')) type = TransactionType.INCOME;
+             else {
+                 // Fallback to global keywords if no specific proximity match
+                 // But be careful not to match Balance's CR
+                 if (lowerLine.includes('withdrawal') || lowerLine.includes('debit')) type = TransactionType.EXPENSE;
+                 else if (lowerLine.includes('deposit')) type = TransactionType.INCOME;
+             }
+        }
+    } else {
+        // Fallback standard
+        if (lowerLine.includes(' cr ') || lowerLine.includes('credit') || lowerLine.includes('deposit')) {
+            type = TransactionType.INCOME;
+        } else if (lowerLine.includes(' dr ') || lowerLine.includes('debit') || lowerLine.includes('withdrawal')) {
+            type = TransactionType.EXPENSE;
+        }
     }
 
     // 6. Clean Description
@@ -359,6 +392,13 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
     candidates.forEach(a => {
         description = description.replace(a.str, '');
     });
+    
+    // Remove "Sl No" if we skipped it
+    if (candidates.length !== validCandidates.length) {
+         // remove the first candidate that was skipped
+         description = description.replace(candidates[0].str, '');
+    }
+
     description = cleanDescription(description);
 
     transactions.push({
