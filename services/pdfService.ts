@@ -55,6 +55,7 @@ const parsePdf = async (file: File): Promise<Transaction[]> => {
 
       items.forEach((item) => {
           if (currentY === -99999) currentY = item.transform[5];
+          // Check for new line
           if (Math.abs(item.transform[5] - currentY) > 4) {
               if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
               currentLine = [];
@@ -78,38 +79,32 @@ const parseSpreadsheet = async (file: File): Promise<Transaction[]> => {
     const firstSheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[firstSheetName];
 
-    // Get as array of arrays to inspect structure
+    // Get as array of arrays
     const rows: any[][] = utils.sheet_to_json(worksheet, { header: 1, raw: false, dateNF: 'yyyy-mm-dd' });
     
-    // 1. Try to detect Structured Format (Header Row)
-    // We look for a header row in the first 10 rows
+    // 1. Header Detection Strategy (Deep Scan 100 rows)
     let headerRowIndex = -1;
     let headers: string[] = [];
+    let bestScore = 0;
 
-    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+    for (let i = 0; i < Math.min(rows.length, 100); i++) {
         const row = rows[i].map(c => c ? c.toString().toLowerCase().trim() : '');
-        // Check for specific column signatures
+        const score = scoreHeaderRow(row);
         
-        // Custom Format: "Month", "Date", "Amt"
-        if (row.includes('month') && row.includes('date') && (row.includes('amt') || row.includes('amount'))) {
+        if (score > bestScore && score >= 2) { // Threshold of 2 matches
+            bestScore = score;
             headerRowIndex = i;
             headers = row;
-            break;
-        }
-        
-        // Bank Format: "Withdrawal", "Deposit", "Date"
-        if (row.includes('date') && row.some(h => h.includes('withdrawal')) && row.some(h => h.includes('deposit'))) {
-            headerRowIndex = i;
-            headers = row;
-            break;
         }
     }
 
     if (headerRowIndex !== -1) {
+        console.log(`Found headers at row ${headerRowIndex}:`, headers);
         return extractFromStructuredRows(rows.slice(headerRowIndex + 1), headers);
     }
 
     // 2. Fallback to Text Extraction
+    console.warn("No structured headers found, falling back to text parsing.");
     const fullText = rows
         .filter(row => row.length > 0)
         .map(row => row.join(' '))
@@ -118,30 +113,53 @@ const parseSpreadsheet = async (file: File): Promise<Transaction[]> => {
     return extractTransactionsFromText(fullText);
 }
 
+const scoreHeaderRow = (row: string[]): number => {
+    let score = 0;
+    const joined = row.join(' ');
+    
+    // Keywords to look for
+    if (row.includes('date') || row.includes('txn date')) score += 1;
+    if (joined.includes('description') || joined.includes('narration') || joined.includes('particulars') || joined.includes('remarks')) score += 1;
+    if (joined.includes('debit') || joined.includes('withdrawal') || joined.includes('dr')) score += 1;
+    if (joined.includes('credit') || joined.includes('deposit') || joined.includes('cr')) score += 1;
+    if (joined.includes('balance') || joined.includes('bal')) score += 0.5;
+    if (row.includes('amount') || row.includes('amt')) score += 1;
+    
+    return score;
+};
+
 // Logic for extracting from recognized Excel table structures
 const extractFromStructuredRows = (rows: any[][], headers: string[]): Transaction[] => {
     const transactions: Transaction[] = [];
     
-    // Map header names to indices
+    // Helper to find index fuzzy
+    const findIdx = (keywords: string[]) => headers.findIndex(h => keywords.some(k => h.includes(k)));
+
+    // Detect Column Indices
     const idx = {
-        month: headers.findIndex(h => h === 'month'),
-        date: headers.findIndex(h => h === 'date'), // Day or Full Date
-        desc: headers.findIndex(h => h.includes('description') || h.includes('narration') || h.includes('particulars')),
-        amt: headers.findIndex(h => h === 'amt' || h === 'amount'),
-        withdrawal: headers.findIndex(h => h.includes('withdrawal') || h.includes('debit')),
-        deposit: headers.findIndex(h => h.includes('deposit') || h.includes('credit')),
-        category: headers.findIndex(h => h.includes('category')),
-        payment: headers.findIndex(h => h.includes('payment')),
+        date: findIdx(['date', 'txn date']),
+        month: findIdx(['month']),
+        // Description
+        desc: findIdx(['narration', 'description', 'particulars', 'remarks', 'details']),
+        // Amounts
+        amt: findIdx(['amount', 'amt']), // Single column amount
+        type: findIdx(['type', 'dr/cr']), // Single column type
+        debit: findIdx(['withdrawal', 'debit', 'dr']),
+        credit: findIdx(['deposit', 'credit', 'cr']),
+        // Metadata
+        category: findIdx(['category']),
+        payment: findIdx(['payment', 'mode']),
+        ref: findIdx(['ref', 'chq', 'cheque'])
     };
 
-    rows.forEach(row => {
+    rows.forEach((row, rowIndex) => {
         try {
-            // -- SCENARIO 1: Custom Sheet (Month + Date columns) --
-            if (idx.month !== -1 && idx.date !== -1) {
-                const monthStr = row[idx.month]?.toString() || ''; // e.g. "Oct'25"
-                const dayStr = row[idx.date]?.toString() || '';     // e.g. "27"
+            // -- SCENARIO 1: Custom Sheet (Month + Date) --
+            if (idx.month !== -1 && idx.date !== -1 && idx.amt !== -1) {
+                const monthStr = row[idx.month]?.toString() || '';
+                const dayStr = row[idx.date]?.toString() || '';
                 
-                // Parse "Oct'25"
+                // Try parsing "Oct'25" or similar
                 const monthMatch = monthStr.match(/([a-zA-Z]{3})['\s-]*(\d{2,4})/);
                 if (monthMatch && dayStr) {
                     const mName = monthMatch[1].toLowerCase();
@@ -153,88 +171,84 @@ const extractFromStructuredRows = (rows: any[][], headers: string[]): Transactio
                     
                     if (monthIndex !== -1) {
                         const dateObj = new Date(year, monthIndex, parseInt(dayStr));
-                        dateObj.setHours(12);
-
-                        const amount = parseFloat(row[idx.amt]?.toString().replace(/,/g, '') || '0');
+                        
+                        const amount = parseAmount(row[idx.amt]);
                         if (amount > 0) {
-                            const desc = row[idx.desc]?.toString() || 'Expense';
-                            const categoryRaw = row[idx.category]?.toString() || '';
-                            const paymentRaw = row[idx.payment]?.toString() || '';
-                            
-                            // Map Category
-                            let cat = Category.OTHER;
-                            // Simple mapping based on text
-                            if (categoryRaw) {
-                                const lowerCat = categoryRaw.toLowerCase();
-                                if (lowerCat.includes('veg') || lowerCat.includes('food')) cat = Category.FOOD;
-                                else if (lowerCat.includes('travel') || lowerCat.includes('fare')) cat = Category.TRANSPORT;
-                                else if (lowerCat.includes('grocery')) cat = Category.FOOD;
-                                else if (lowerCat.includes('shop')) cat = Category.SHOPPING;
-                                else cat = Category.OTHER; // Or keep raw string if Type allows
-                            }
+                            const desc = idx.desc !== -1 ? row[idx.desc]?.toString() : 'Expense';
+                            const catRaw = idx.category !== -1 ? row[idx.category]?.toString() : '';
+                            const payRaw = idx.payment !== -1 ? row[idx.payment]?.toString() : '';
 
-                            // Map Payment
-                            let method = PaymentMethod.ONLINE;
-                            if (paymentRaw.toLowerCase().includes('ppe') || paymentRaw.toLowerCase().includes('upi')) method = PaymentMethod.UPI;
-                            
-                            // Default to Expense unless Category implies Income (like Salary)
-                            // In this specific sheet, 'Amt' seems to be expenses mostly?
-                            // Let's assume Expense by default for this format.
                             transactions.push({
                                 id: crypto.randomUUID(),
                                 date: dateObj.toISOString(),
                                 amount,
-                                description: desc,
-                                type: TransactionType.EXPENSE, // Default
-                                category: cat,
-                                paymentMethod: method
+                                description: cleanDescription(desc || 'Expense'),
+                                type: TransactionType.EXPENSE, // Default for this format usually
+                                category: detectCategory(catRaw || desc || ''),
+                                paymentMethod: detectPaymentMethod(payRaw || desc || '')
                             });
                         }
                     }
                 }
+                return; // processed
             }
-            // -- SCENARIO 2: Bank Statement (Withdrawal / Deposit columns) --
-            else if ((idx.withdrawal !== -1 || idx.deposit !== -1) && idx.date !== -1) {
-                 // Date parsing
-                 const dateRaw = row[idx.date]?.toString();
-                 if (!dateRaw) return;
+
+            // -- SCENARIO 2: Bank Statement (Withdrawal/Deposit columns) --
+            // Priority: Date must exist
+            if (idx.date === -1) return;
+
+            const dateRaw = row[idx.date];
+            if (!dateRaw) return;
+
+            const dateObj = parseAnyDate(dateRaw);
+            if (!dateObj || isNaN(dateObj.getTime())) return;
+
+            let amount = 0;
+            let type = TransactionType.EXPENSE; // Default
+
+            // Logic 2A: Split Debit/Credit Columns (Common in HDFC, SBI, ICICI)
+            if (idx.debit !== -1 || idx.credit !== -1) {
+                const debitVal = idx.debit !== -1 ? parseAmount(row[idx.debit]) : 0;
+                const creditVal = idx.credit !== -1 ? parseAmount(row[idx.credit]) : 0;
+
+                if (debitVal > 0) {
+                    amount = debitVal;
+                    type = TransactionType.EXPENSE;
+                } else if (creditVal > 0) {
+                    amount = creditVal;
+                    type = TransactionType.INCOME;
+                }
+            } 
+            // Logic 2B: Single Amount Column + Type Column
+            else if (idx.amt !== -1 && idx.type !== -1) {
+                amount = parseAmount(row[idx.amt]);
+                const typeStr = row[idx.type]?.toString().toLowerCase() || '';
+                if (typeStr.includes('cr') || typeStr.includes('credit')) type = TransactionType.INCOME;
+            }
+            // Logic 2C: Single Amount Column (Assume Expense unless negative?)
+            else if (idx.amt !== -1) {
+                const rawAmt = row[idx.amt];
+                amount = parseAmount(rawAmt);
+                // Check if string had negative sign or 'Cr'
+                if (rawAmt && rawAmt.toString().toLowerCase().includes('cr')) type = TransactionType.INCOME;
+            }
+
+            if (amount > 0) {
+                 const desc = idx.desc !== -1 ? (row[idx.desc]?.toString() || '') : 'Transaction';
                  
-                 const dateObj = parseDateString(dateRaw);
-                 if (!dateObj) return;
-
-                 const withdrawal = parseFloat(row[idx.withdrawal]?.toString().replace(/,/g, '') || '0');
-                 const deposit = parseFloat(row[idx.deposit]?.toString().replace(/,/g, '') || '0');
-
-                 let amount = 0;
-                 let type = TransactionType.EXPENSE;
-
-                 if (withdrawal > 0) {
-                     amount = withdrawal;
-                     type = TransactionType.EXPENSE;
-                 } else if (deposit > 0) {
-                     amount = deposit;
-                     type = TransactionType.INCOME;
-                 }
-
-                 if (amount > 0) {
-                     let desc = row[idx.desc]?.toString() || 'Transaction';
-                     // Cleanup description
-                     desc = desc.replace(/\s+/g, ' ').trim();
-                     
-                     transactions.push({
-                        id: crypto.randomUUID(),
-                        date: dateObj.toISOString(),
-                        amount,
-                        description: desc,
-                        type,
-                        category: detectCategory(desc),
-                        paymentMethod: detectPaymentMethod(desc)
-                    });
-                 }
+                 transactions.push({
+                    id: crypto.randomUUID(),
+                    date: dateObj.toISOString(),
+                    amount,
+                    description: cleanDescription(desc),
+                    type,
+                    category: detectCategory(desc),
+                    paymentMethod: detectPaymentMethod(desc)
+                });
             }
 
         } catch (e) {
-            console.warn("Row parse error", e);
+            console.warn(`Row ${rowIndex} parse error`, e);
         }
     });
 
@@ -246,84 +260,106 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
   const transactions: Transaction[] = [];
   const lines = text.split('\n');
   
+  // 1. HEADER SCAN for PDFs (Deep scan first 100 lines)
+  // We try to find where the table starts to avoid garbage at the top.
+  let startIndex = 0;
+  for (let i = 0; i < Math.min(lines.length, 100); i++) {
+      const line = lines[i].toLowerCase();
+      // Look for a header signature
+      if (line.includes('date') && (line.includes('balance') || line.includes('withdrawal') || line.includes('deposit') || line.includes('debit'))) {
+          startIndex = i + 1;
+          console.log("PDF Table Header detected at line:", i);
+          break;
+      }
+  }
+
   // Regex to match dates like 29/07/15, 2024-01-01, 01-Jan-2024
   const dateRegex = /\b(\d{1,2}[-/.](?:\d{1,2}|[A-Za-z]{3})[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
   
   // Regex to match currency-like numbers.
   const amountRegex = /\b(?:[1-9]\d{0,2}(?:,\d{3})*|0)(?:\.\d{1,2})?\b/g;
 
-  lines.forEach(line => {
-    const cleanLine = line.trim();
-    if (!cleanLine) return;
+  for (let i = startIndex; i < lines.length; i++) {
+    const cleanLine = lines[i].trim();
+    if (!cleanLine) continue;
 
     // 1. Find Date
     const dateMatch = cleanLine.match(dateRegex);
-    if (!dateMatch) return;
+    if (!dateMatch) continue;
 
-    const dateObj = parseDateString(dateMatch[0]);
-    if (!dateObj) return;
+    const dateObj = parseAnyDate(dateMatch[0]);
+    if (!dateObj) continue;
 
     // 2. Remove date from line
     let lineWithoutDate = cleanLine.replace(dateMatch[0], ' ');
 
-    // 3. Find all amounts
+    // 3. Find all potential numbers
     const amounts = [...lineWithoutDate.matchAll(amountRegex)]
-        .map(m => parseFloat(m[0].replace(/,/g, '')))
-        .filter(n => !isNaN(n) && n > 0);
+        .map(m => ({ val: parseFloat(m[0].replace(/,/g, '')), str: m[0] }));
 
-    // Filter out unlikely amounts (like years 2024, 2025 appearing as integers)
-    // Only if it looks exactly like a year (integer 1990-2030) and we have other numbers
-    const validAmounts = amounts.filter(a => {
-        if (Number.isInteger(a) && a > 1990 && a < 2030) return false; 
-        return true; 
+    // 4. Heuristics to identify the Transaction Amount vs Balance vs Ref No
+    
+    const candidates = amounts.filter(a => {
+        if (a.val === 0) return false;
+
+        // If it's an integer
+        if (!a.str.includes('.')) {
+            // If it's 4 digits and looks like a recent year, likely garbage
+            if (a.val >= 1990 && a.val <= 2030) return false;
+        }
+        return true;
     });
 
-    if (validAmounts.length === 0) return;
+    if (candidates.length === 0) continue;
 
-    // 4. Logic for Multiple Amounts (Transaction Amt vs Balance)
-    // Usually: [Withdrawal/Deposit] [Balance]
-    // So the transaction amount is usually NOT the last one if there are >= 2 numbers.
-    // If there is only 1 number, it's the transaction.
-    // If there are 2 numbers, the first is transaction, second is balance.
-    // If there are 3 numbers? (Withdrawal, Deposit, Balance) -> rare in one line unless parsed weirdly.
+    let amount = 0;
     
-    const amount = validAmounts.length >= 2 ? validAmounts[0] : validAmounts[0];
+    // Logic for HDFC / Standard Statement: [Ref, Amount, Balance] OR [Amount, Balance]
+    
+    if (candidates.length === 1) {
+        amount = candidates[0].val;
+    } else {
+        // Assume Last number is Balance, usually.
+        // We want the number BEFORE the balance.
+        // UNLESS there is only [Ref, Amount].
+        
+        // Let's filter out "Ref-like" numbers from the candidates first.
+        // Ref is usually a large Integer appearing FIRST.
+        const nonRefCandidates = candidates.filter((c, idx) => {
+             // If first number is integer > 1000 and there is a subsequent number with decimal, assume first is Ref.
+             if (idx === 0 && !c.str.includes('.') && c.val > 1000 && candidates.length > 1) return false;
+             return true;
+        });
+
+        if (nonRefCandidates.length === 0) {
+            // Fallback
+             amount = candidates[0].val;
+        } else if (nonRefCandidates.length === 1) {
+             amount = nonRefCandidates[0].val;
+        } else {
+            // We have 2+ non-ref numbers. (e.g. Withdrawal, Balance).
+            // Usually the Transaction is the First of these.
+            // Balance is the Last.
+            amount = nonRefCandidates[0].val;
+        }
+    }
 
     // 5. Determine Type
     let type = TransactionType.EXPENSE;
     const lowerLine = cleanLine.toLowerCase();
     
-    // Explicit keywords
     if (lowerLine.includes(' cr ') || lowerLine.includes('credit') || lowerLine.includes('deposit') || lowerLine.includes(' dep ')) {
         type = TransactionType.INCOME;
-    } 
-    // If using structured columns logic (visual position), we can't do that easily in text.
-    // We rely on keywords in narration for PDFs often.
-    // e.g. "NEFT DR..." -> Expense. "CHQ DEP" -> Income.
-    
-    // Default to Expense unless proven otherwise, but if we found multiple numbers, 
-    // and one is clearly a Credit keyword, switch.
+    } else if (lowerLine.includes(' dr ') || lowerLine.includes('debit') || lowerLine.includes('withdrawal')) {
+        type = TransactionType.EXPENSE;
+    }
 
     // 6. Clean Description
-    // Remove all found amounts from the description text
     let description = lineWithoutDate;
-    validAmounts.forEach(a => {
-        // approximate match for regex replacement
-        description = description.replace(new RegExp(a.toString().replace('.', '\\.') + '\\b'), '');
+    candidates.forEach(a => {
+        description = description.replace(a.str, '');
     });
-    
-    // Remove numeric formatting commas from description if leftovers
-    description = description.replace(/\b\d{1,3},\d{3}\b/g, ''); 
-    
-    description = description
-        .replace(/\b(cr|dr|credit|debit)\b/gi, '')
-        .replace(/[0-9]+\.[0-9]+/g, '') // Remove float leftovers
-        .replace(/\s+/g, ' ')
-        .trim();
-        
-    description = description.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, ''); // Trim symbols
-    if (description.length > 60) description = description.substring(0, 60).trim() + '...';
-    if (!description) description = "Transaction";
+    description = cleanDescription(description);
 
     transactions.push({
         id: crypto.randomUUID(),
@@ -334,33 +370,47 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
         category: detectCategory(description),
         paymentMethod: detectPaymentMethod(description)
     });
-  });
+  }
 
   return transactions;
 };
 
 // -- Helpers --
 
-const parseDateString = (dateStr: string): Date | null => {
-    try {
-        const parts = dateStr.split(/[-/.\s]/);
-        if (parts.length < 2) return null;
+const parseAmount = (val: any): number => {
+    if (typeof val === 'number') return val;
+    if (typeof val === 'string') {
+        const clean = val.replace(/[^0-9.-]/g, '');
+        const f = parseFloat(clean);
+        return isNaN(f) ? 0 : f;
+    }
+    return 0;
+};
+
+const parseAnyDate = (val: any): Date | null => {
+    if (!val) return null;
+    
+    // Excel Serial Date (Number)
+    if (typeof val === 'number') {
+        const date = new Date((val - (25567 + 2)) * 86400 * 1000); 
+        return date;
+    }
+
+    // String Date
+    if (typeof val === 'string') {
+        const parts = val.split(/[-/.\s]/);
+        if (parts.length < 2) return new Date(val); 
 
         let day = 1, month = 0, year = new Date().getFullYear();
 
-        // Detect format
-        // Case: YYYY-MM-DD
         if (parts[0].length === 4) {
             year = parseInt(parts[0]);
             month = parseInt(parts[1]) - 1;
             day = parseInt(parts[2]);
         } 
-        // Case: DD-MM-YYYY or MM/DD/YYYY? 
-        // Assume DD-MM-YYYY for India/UK formats usually found in bank statements
         else {
             day = parseInt(parts[0]);
             
-            // Month is text? (Jan, Feb)
             if (isNaN(parseInt(parts[1]))) {
                 const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
                 const mStr = parts[1].toLowerCase().substring(0, 3);
@@ -369,7 +419,6 @@ const parseDateString = (dateStr: string): Date | null => {
                 month = parseInt(parts[1]) - 1;
             }
 
-            // Year
             if (parts.length === 3) {
                 const y = parts[2];
                 year = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
@@ -379,28 +428,37 @@ const parseDateString = (dateStr: string): Date | null => {
         const d = new Date(year, month, day);
         d.setHours(12);
         return d;
-    } catch (e) {
-        return null;
     }
+    
+    return null;
+}
+
+const cleanDescription = (desc: string): string => {
+    return desc
+        .replace(/\b(cr|dr|credit|debit|withdrawal|deposit)\b/gi, '') // Remove keywords
+        .replace(/[0-9]+\.[0-9]+/g, '') // Remove leftover floats
+        .replace(/\s+/g, ' ') // Collapse spaces
+        .replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '') // Trim symbols
+        .trim() || "Transaction";
 }
 
 const detectCategory = (text: string): Category => {
     const lower = text.toLowerCase();
-    if (lower.includes('swiggy') || lower.includes('zomato') || lower.includes('food') || lower.includes('restaurant') || lower.includes('cafe') || lower.includes('tea') || lower.includes('coffee')) return Category.FOOD;
-    if (lower.includes('uber') || lower.includes('ola') || lower.includes('fuel') || lower.includes('petrol') || lower.includes('pump') || lower.includes('parking') || lower.includes('toll')) return Category.TRANSPORT;
-    if (lower.includes('netflix') || lower.includes('prime') || lower.includes('movie') || lower.includes('cinema') || lower.includes('hotstar')) return Category.ENTERTAINMENT;
-    if (lower.includes('rent') || lower.includes('maintenance') || lower.includes('society')) return Category.HOUSING;
-    if (lower.includes('jio') || lower.includes('airtel') || lower.includes('vi ') || lower.includes('bill') || lower.includes('electricity') || lower.includes('water') || lower.includes('gas') || lower.includes('broadband')) return Category.UTILITIES;
-    if (lower.includes('salary')) return Category.SALARY;
-    if (lower.includes('interest')) return Category.INVESTMENT;
-    if (lower.includes('hospital') || lower.includes('pharmacy') || lower.includes('doctor') || lower.includes('med') || lower.includes('lab')) return Category.HEALTH;
-    if (lower.includes('mart') || lower.includes('store') || lower.includes('market') || lower.includes('amazon') || lower.includes('flipkart')) return Category.SHOPPING;
+    if (lower.includes('swiggy') || lower.includes('zomato') || lower.includes('food') || lower.includes('restaurant') || lower.includes('cafe') || lower.includes('tea') || lower.includes('coffee') || lower.includes('burger') || lower.includes('pizza')) return Category.FOOD;
+    if (lower.includes('uber') || lower.includes('ola') || lower.includes('fuel') || lower.includes('petrol') || lower.includes('pump') || lower.includes('parking') || lower.includes('toll') || lower.includes('metro') || lower.includes('train') || lower.includes('rail')) return Category.TRANSPORT;
+    if (lower.includes('netflix') || lower.includes('prime') || lower.includes('movie') || lower.includes('cinema') || lower.includes('hotstar') || lower.includes('spotify') || lower.includes('youtube')) return Category.ENTERTAINMENT;
+    if (lower.includes('rent') || lower.includes('maintenance') || lower.includes('society') || lower.includes('broker')) return Category.HOUSING;
+    if (lower.includes('jio') || lower.includes('airtel') || lower.includes('vi ') || lower.includes('bill') || lower.includes('electricity') || lower.includes('water') || lower.includes('gas') || lower.includes('broadband') || lower.includes('recharge')) return Category.UTILITIES;
+    if (lower.includes('salary') || lower.includes('bonus') || lower.includes('stipend')) return Category.SALARY;
+    if (lower.includes('interest') || lower.includes('dividend') || lower.includes('zerodha') || lower.includes('groww') || lower.includes('sip')) return Category.INVESTMENT;
+    if (lower.includes('hospital') || lower.includes('pharmacy') || lower.includes('doctor') || lower.includes('med') || lower.includes('lab') || lower.includes('clinic')) return Category.HEALTH;
+    if (lower.includes('mart') || lower.includes('store') || lower.includes('market') || lower.includes('amazon') || lower.includes('flipkart') || lower.includes('myntra') || lower.includes('shop')) return Category.SHOPPING;
     return Category.OTHER;
 }
 
 const detectPaymentMethod = (text: string): PaymentMethod => {
     const lower = text.toLowerCase();
-    if (lower.includes('upi') || lower.includes('@') || lower.includes('gpay') || lower.includes('phonepe') || lower.includes('paytm')) return PaymentMethod.UPI;
+    if (lower.includes('upi') || lower.includes('@') || lower.includes('gpay') || lower.includes('phonepe') || lower.includes('paytm') || lower.includes('bhim')) return PaymentMethod.UPI;
     if (lower.includes('atm') || lower.includes('cash') || lower.includes('withdraw')) return PaymentMethod.CASH;
     return PaymentMethod.ONLINE;
 }
