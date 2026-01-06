@@ -5,7 +5,7 @@ import { Transaction, TransactionType, Category, PaymentMethod } from '../types.
 // Handle ESM/CJS interop for pdfjs-dist
 const pdfjsLib = (pdfjsLibModule as any).default || pdfjsLibModule;
 
-if (pdfjsLib.GlobalWorkerOptions) {
+if (pdfjsLib.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 }
 
@@ -22,60 +22,77 @@ export const parseBankStatement = async (file: File): Promise<Transaction[]> => 
     ) {
         return await parseSpreadsheet(file);
     } else {
-        throw new Error('Unsupported file format.');
+        throw new Error('Unsupported file format. Please upload PDF, Excel, or CSV.');
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('File Parse Error:', error);
-    throw new Error('Failed to read file');
+    if (error.name === 'PasswordException' || error.message?.includes('password')) {
+        throw new Error('Password protected files are not supported. Please remove the password and try again.');
+    }
+    throw new Error(error.message || 'Failed to read file');
   }
 };
 
 const parsePdf = async (file: File): Promise<Transaction[]> => {
     const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
-    
-    let fullText = '';
+    try {
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        
+        let fullText = '';
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const textContent = await page.getTextContent();
-      const items: any[] = textContent.items;
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const items: any[] = textContent.items;
 
-      // Sort items by Y (descending) then X (ascending)
-      items.sort((a, b) => {
-          const yDiff = b.transform[5] - a.transform[5];
-          if (Math.abs(yDiff) > 4) return yDiff; 
-          return a.transform[4] - b.transform[4];
-      });
+            // Sort items by Y (descending) then X (ascending)
+            items.sort((a, b) => {
+                const yDiff = b.transform[5] - a.transform[5];
+                if (Math.abs(yDiff) > 4) return yDiff; 
+                return a.transform[4] - b.transform[4];
+            });
 
-      let currentY = -99999;
-      let pageLines: string[] = [];
-      let currentLine: string[] = [];
+            let currentY = -99999;
+            let pageLines: string[] = [];
+            let currentLine: string[] = [];
 
-      items.forEach((item) => {
-          if (currentY === -99999) currentY = item.transform[5];
-          // Check for new line
-          if (Math.abs(item.transform[5] - currentY) > 4) {
-              if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
-              currentLine = [];
-              currentY = item.transform[5];
-          }
-          if (item.str.trim()) {
-              currentLine.push(item.str);
-          }
-      });
-      if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
+            items.forEach((item) => {
+                if (currentY === -99999) currentY = item.transform[5];
+                // Check for new line
+                if (Math.abs(item.transform[5] - currentY) > 4) {
+                    if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
+                    currentLine = [];
+                    currentY = item.transform[5];
+                }
+                if (item.str.trim()) {
+                    currentLine.push(item.str);
+                }
+            });
+            if (currentLine.length > 0) pageLines.push(currentLine.join(' '));
 
-      fullText += pageLines.join('\n') + '\n';
+            fullText += pageLines.join('\n') + '\n';
+        }
+        
+        return extractTransactionsFromText(fullText);
+    } catch (e: any) {
+        if (e.name === 'PasswordException') {
+            throw new Error('Password protected PDF');
+        }
+        throw e;
     }
-    
-    return extractTransactionsFromText(fullText);
 }
 
 const parseSpreadsheet = async (file: File): Promise<Transaction[]> => {
     const arrayBuffer = await file.arrayBuffer();
-    const workbook = read(arrayBuffer, { type: 'array', cellDates: true });
+    // Use read with error handling
+    let workbook;
+    try {
+        workbook = read(arrayBuffer, { type: 'array', cellDates: true });
+    } catch (e) {
+        throw new Error("Could not parse Excel/CSV file. Ensure it is not corrupted.");
+    }
+
     const firstSheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[firstSheetName];
 
@@ -118,12 +135,13 @@ const scoreHeaderRow = (row: string[]): number => {
     const joined = row.join(' ');
     
     // Keywords to look for
-    if (row.includes('date') || row.includes('txn date')) score += 1;
+    if (row.includes('date') || row.includes('txn date') || joined.includes('value date')) score += 1;
     if (joined.includes('description') || joined.includes('narration') || joined.includes('particulars') || joined.includes('remarks')) score += 1;
     if (joined.includes('debit') || joined.includes('withdrawal') || joined.includes('dr')) score += 1;
     if (joined.includes('credit') || joined.includes('deposit') || joined.includes('cr')) score += 1;
     if (joined.includes('balance') || joined.includes('bal')) score += 0.5;
-    if (row.includes('amount') || row.includes('amt') || row.includes('widthdrawal amt.') || row.includes('deposit amt.')) score += 1;
+    // Fixed typo: widthdrawal -> withdrawal
+    if (row.includes('amount') || row.includes('amt') || row.includes('withdrawal amt.') || row.includes('deposit amt.')) score += 1;
     
     return score;
 };

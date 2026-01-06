@@ -57,8 +57,9 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
               showToast(`Imported ${transactions.length} transactions!`, "success");
               onClose();
           }
-      } catch (error) {
-          showToast("Failed to parse statement. Please check file format.", "error");
+      } catch (error: any) {
+          // Show the actual error message which might be "Password protected..." or "Unsupported format..."
+          showToast(error.message || "Failed to parse statement. Please check file format.", "error");
       } finally {
           setIsProcessing(false);
           // Reset input
