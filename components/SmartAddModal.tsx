@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, IndianRupee, Upload, FileText, Loader2, PenTool } from 'lucide-react';
+import { X, IndianRupee, Upload, FileText, Loader2, PenTool, Download } from 'lucide-react';
 import { Transaction, TransactionType, Category, PaymentMethod } from '../types.ts';
 import { parseBankStatement } from '../services/pdfService.ts';
 
@@ -51,7 +51,7 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
       try {
           const transactions = await parseBankStatement(file);
           if (transactions.length === 0) {
-              showToast("No valid transactions found in file. Ensure file has Date and Amount columns.", "info");
+              showToast("No valid transactions found. Ensure file has Date and Amount columns.", "info");
           } else {
               transactions.forEach(t => onAdd(t));
               showToast(`Imported ${transactions.length} transactions!`, "success");
@@ -61,7 +61,31 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
           showToast("Failed to parse statement. Please check file format.", "error");
       } finally {
           setIsProcessing(false);
+          // Reset input
+          e.target.value = '';
       }
+  };
+
+  const downloadSampleFile = () => {
+      const headers = "Date,Description,Amount,Type,Category,Method\n";
+      const rows = [
+          "2024-03-01,Salary Credit,50000,Income,Salary,Online",
+          "2024-03-05,Rent Payment,15000,Expense,Housing,Online",
+          "2024-03-10,Grocery Store,2500.00,Expense,Food & Drink,UPI",
+          "2024-03-12,Netflix,649,Expense,Entertainment,Card",
+          "2024-03-15,Petrol Pump,2000,Expense,Transportation,Cash"
+      ].join("\n");
+      
+      const csvContent = headers + rows;
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = "fintrack_sample_statement.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
   };
 
   const resetForm = () => {
@@ -219,8 +243,12 @@ const SmartAddModal: React.FC<SmartAddModalProps> = ({ isOpen, onClose, onAdd, s
                                 </div>
                                 <input type="file" accept=".pdf, .xlsx, .xls, .csv" className="hidden" onChange={handleFileUpload} />
                             </label>
+
+                            <button onClick={downloadSampleFile} className="text-xs text-indigo-600 font-medium flex items-center gap-1 hover:underline mt-2">
+                                <Download size={12} /> Download Sample File
+                            </button>
                             
-                            <p className="text-[10px] text-gray-400 mt-4">
+                            <p className="text-[10px] text-gray-400 mt-2">
                                 Supported formats: .pdf, .xlsx, .xls, .csv
                             </p>
                         </>

@@ -37,7 +37,6 @@ export const parseBankStatement = async (file: File): Promise<Transaction[]> => 
 const parsePdf = async (file: File): Promise<Transaction[]> => {
     const arrayBuffer = await file.arrayBuffer();
     
-    // pdfjsLib.getDocument returns a loading task, we need to await .promise
     const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
     const pdf = await loadingTask.promise;
     
@@ -84,6 +83,8 @@ const parsePdf = async (file: File): Promise<Transaction[]> => {
 
       fullText += pageLines.join('\n') + '\n';
     }
+    
+    console.log("PDF Extracted Text:", fullText.substring(0, 500) + "..."); // Debugging
 
     return extractTransactionsFromText(fullText);
 }
@@ -99,7 +100,6 @@ const parseSpreadsheet = async (file: File): Promise<Transaction[]> => {
 
     // Convert sheet to array of arrays
     // Use raw: false to get formatted strings for numbers (helpful for consistency)
-    // but check if we need dateNF to ensure dates come out in a recognizable text format
     const rows: any[][] = utils.sheet_to_json(worksheet, { 
         header: 1, 
         raw: false, 
@@ -113,6 +113,8 @@ const parseSpreadsheet = async (file: File): Promise<Transaction[]> => {
         .map(row => row.join(' '))
         .join('\n');
     
+    console.log("Spreadsheet Extracted Text:", fullText.substring(0, 500) + "..."); // Debugging
+    
     return extractTransactionsFromText(fullText);
 }
 
@@ -124,10 +126,11 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
   // Date Regex: Matches DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, DD MMM YYYY
   const dateRegex = /\b(\d{1,2}[-/.](?:\d{1,2}|[A-Za-z]{3})[-/.]\d{2,4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\b/;
   
-  // Amount Regex: Matches numbers with optional commas and mandatory decimal (1 or 2 places)
-  // We require a decimal to avoid matching IDs, Years, or Check Numbers as amounts
-  // e.g. 1,000.00, 500.5, 500.0
-  const amountRegex = /\b(?:[1-9]\d{0,2}(?:,\d{3})*|0)\.\d{1,2}\b/;
+  // Amount Regex: Matches numbers with optional commas
+  // UPDATED: Now supports integers (no decimal) or decimals. 
+  // Looks for numbers that look like currency (1,000 or 1000.00 or 500)
+  // Caution: Can match years if not careful, relying on date removal to prevent year matching.
+  const amountRegex = /\b(?:[1-9]\d{0,2}(?:,\d{3})*|0)(?:\.\d{1,2})?\b/;
 
   lines.forEach(line => {
     const cleanLine = line.trim();
@@ -138,7 +141,6 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
     
     if (dateMatch) {
         // 2. Remove the date from the line so we don't accidentally match the year as an amount
-        // (e.g. 2024 could look like an amount if we relaxed the regex too much)
         const lineWithoutDate = cleanLine.replace(dateMatch[0], ' ');
         
         // 3. Find Amount in the remaining text
@@ -148,12 +150,26 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
             const amountStr = amountMatch[0].replace(/,/g, '');
             const amount = parseFloat(amountStr);
             
+            // Safety check: specific logic to ignore likely years if they are integers between 1990-2030
+            // and didn't have a decimal.
+            const isInteger = !amountStr.includes('.');
+            if (isInteger && amount > 1990 && amount < 2030) {
+               // Check if there is ANOTHER number on the line that looks like an amount?
+               // For now, let's skip if it looks too much like a year and is an integer.
+               // However, 2000 is a valid amount. 
+               // Heuristic: If we found a date already, the year is gone. 
+               // So this '2024' is likely a transaction amount or ID. 
+               // We'll accept it for now.
+            }
+
             // Determine Type
             let type = TransactionType.EXPENSE;
             const lowerLine = cleanLine.toLowerCase();
             
             if (lowerLine.includes('cr') || lowerLine.includes('credit') || lowerLine.includes('deposit') || cleanLine.includes('+')) {
                 type = TransactionType.INCOME;
+            } else if (lineWithoutDate.match(/\bdr\b/i) || lowerLine.includes('debit') || lowerLine.includes('withdrawal')) {
+                type = TransactionType.EXPENSE;
             }
 
             // Determine Category & Method
@@ -162,19 +178,20 @@ const extractTransactionsFromText = (text: string): Transaction[] => {
 
             if (lowerLine.includes('upi')) method = PaymentMethod.UPI;
             else if (lowerLine.includes('atm') || lowerLine.includes('cash') || lowerLine.includes('withdrawal')) method = PaymentMethod.CASH;
+            else if (lowerLine.includes('card') || lowerLine.includes('visa') || lowerLine.includes('mastercard')) method = PaymentMethod.ONLINE;
 
-            if (lowerLine.includes('swiggy') || lowerLine.includes('zomato') || lowerLine.includes('food') || lowerLine.includes('restaurant')) category = Category.FOOD;
-            else if (lowerLine.includes('uber') || lowerLine.includes('ola') || lowerLine.includes('fuel') || lowerLine.includes('petrol')) category = Category.TRANSPORT;
-            else if (lowerLine.includes('netflix') || lowerLine.includes('prime') || lowerLine.includes('movie')) category = Category.ENTERTAINMENT;
-            else if (lowerLine.includes('rent') || lowerLine.includes('maintenance')) category = Category.HOUSING;
-            else if (lowerLine.includes('jio') || lowerLine.includes('airtel') || lowerLine.includes('bill') || lowerLine.includes('electricity')) category = Category.UTILITIES;
+            if (lowerLine.includes('swiggy') || lowerLine.includes('zomato') || lowerLine.includes('food') || lowerLine.includes('restaurant') || lowerLine.includes('cafe')) category = Category.FOOD;
+            else if (lowerLine.includes('uber') || lowerLine.includes('ola') || lowerLine.includes('fuel') || lowerLine.includes('petrol') || lowerLine.includes('parking')) category = Category.TRANSPORT;
+            else if (lowerLine.includes('netflix') || lowerLine.includes('prime') || lowerLine.includes('movie') || lowerLine.includes('cinema')) category = Category.ENTERTAINMENT;
+            else if (lowerLine.includes('rent') || lowerLine.includes('maintenance') || lowerLine.includes('house')) category = Category.HOUSING;
+            else if (lowerLine.includes('jio') || lowerLine.includes('airtel') || lowerLine.includes('vodafone') || lowerLine.includes('bill') || lowerLine.includes('electricity') || lowerLine.includes('water')) category = Category.UTILITIES;
             else if (lowerLine.includes('salary')) {
                 category = Category.SALARY;
                 type = TransactionType.INCOME;
             } else if (lowerLine.includes('interest')) {
                 category = Category.INVESTMENT;
                 type = TransactionType.INCOME;
-            }
+            } else if (lowerLine.includes('hospital') || lowerLine.includes('pharmacy') || lowerLine.includes('doctor') || lowerLine.includes('med')) category = Category.HEALTH;
 
             // Clean Description: Remove date, amount, and common keywords
             let description = lineWithoutDate
